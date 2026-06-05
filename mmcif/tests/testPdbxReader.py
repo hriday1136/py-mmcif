@@ -49,13 +49,16 @@ class PdbxReaderTests(unittest.TestCase):
         self.__startTime = time.time()
         logger.debug("Running tests on version %s", __version__)
         logger.debug("Starting %s at %s", self.id(), time.strftime("%Y %m %d %H:%M:%S", time.localtime()))
+        print("setup is working")
 
     def tearDown(self):
         endTime = time.time()
         logger.debug("Completed %s at %s (%.4f seconds)", self.id(), time.strftime("%Y %m %d %H:%M:%S", time.localtime()), endTime - self.__startTime)
+        print("teardown is working")
 
     def testReadSmallDataFile(self):
         """Test case -  read data file and count atoms"""
+        print("testReadSmallDataFile is working")
         try:
             #
             myDataList = []
@@ -83,6 +86,7 @@ class PdbxReaderTests(unittest.TestCase):
 
     def testReadBigDataFile(self):
         """Test case -  read large data file"""
+        print("testReadBigDataFile is working")
         try:
             #
             myDataList = []
@@ -97,6 +101,7 @@ class PdbxReaderTests(unittest.TestCase):
 
     def testReadSFDataFile(self):
         """Test case -  read PDB structure factor data  file and compute statistics on f/sig(f)."""
+        print("testReadSFDataFile is working")
         try:
             #
             myContainerList = []

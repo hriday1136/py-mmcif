@@ -79,6 +79,7 @@ class PdbxReader(object):
             raise PdbxError("Failing at line %d with %s" % (self.__curLineNumber, str(e)))
         else:
             raise PdbxError("Miscellaneous parsing error at line %d" % self.__curLineNumber)
+        
 
     def __allSelected(self, container, catSelectD):
         """Test the input container for completeness relative to the input category selection dictionary."""

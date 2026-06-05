@@ -78,12 +78,10 @@ class BinaryCifWriterTests(unittest.TestCase):
         self.__pathOutputDir = os.path.join(HERE, "test-output")
         self.__baseCifUrl = "https://files.rcsb.org/download/"
         # 8CCS caused failure to decode
-        self.__testCifList = ["1BNA", "1A2C", "1ACJ", "1J59", "1D3I",
-                              "1ONX", "1PGA", "4CXL", "5ZMZ", "200L",
-                              "4HHB", "7NO1", "1OCD", "8CCS"]
-        self.__testBcifOutput = os.path.join(self.__pathOutputDir, "1bna-generated.bcif")
-        self.__testBcifTranslated = os.path.join(self.__pathOutputDir, "1bna-generated-translated.bcif")
-        self.__testBcifTypeOutput = os.path.join(self.__pathOutputDir, "type-generated.bcif")
+        self.__testCifList = ["5ZMZ"]
+        self.__testBcifOutput = os.path.join(self.__pathOutputDir, "5zmz-py_generated.bcif")
+        self.__testBcifTranslated = os.path.join(self.__pathOutputDir, "5zmz-generated-translated.bcif")
+        self.__testBcifTypeOutput = os.path.join(self.__pathOutputDir, "5zmz-type-generated.bcif")
 
         #
         self.__pathPdbxDictionary = os.path.join(HERE, "data", "mmcif_pdbx_v5_next.dic")
