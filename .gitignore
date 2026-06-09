@@ -110,3 +110,7 @@ venv.bak/
 
 
 # files and additional test files
+*.bcif
+datatype_dict-vs-auto.csv
+dataType_dict.txt
+dataType.txt

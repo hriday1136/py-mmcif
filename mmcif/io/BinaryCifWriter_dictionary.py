@@ -5,12 +5,6 @@
 #  Write methods and encoders for binary CIF serialization.
 #
 #  Updates:
-#   - dictionaryApi type resolution replaced with auto-detection via
-#     bcif_type_detector.classify_column().  The dictionaryApi parameter
-#     is now optional; if None is passed (or omitted), auto-detection is
-#     used exclusively.  If a dictionaryApi is supplied, it is used as a
-#     fallback only for attributes that cannot be typed from their values
-#     (e.g. all-sentinel columns).
 #
 ##
 
@@ -19,12 +13,6 @@ import struct
 import msgpack
 import warnings
 
-# ---------------------------------------------------------------------------
-# Auto-detection import — replaces the dictionaryApi type lookup chain:
-#   dictionaryApi.getTypeCode()  →  DataCategoryHints.getPdbxItemType()
-# ---------------------------------------------------------------------------
-from bcif_type_detector import classify_column, ColumnProfile
-
 from mmcif.api.DataCategoryTyped import DataCategoryTyped, DataCategoryHints
 from mmcif.api.PdbxContainers import CifName
 from mmcif.io.BinaryCifReader import BinaryCifDecoders
@@ -32,12 +20,12 @@ from mmcif.io.BinaryCifReader import BinaryCifDecoders
 logger = logging.getLogger(__name__)
 
 
-class BinaryCifWriter(object):
+class BinaryCifWriter_dictionary(object):
     """Writer methods for the binary CIF format."""
 
     def __init__(
         self,
-        dictionaryApi=None,
+        dictionaryApi,
         storeStringsAsBytes=False,
         defaultStringEncoding="utf-8",
         applyTypes=True,
@@ -50,20 +38,15 @@ class BinaryCifWriter(object):
         """Create an instance of the binary CIF writer class.
 
         Args:
-            dictionaryApi (object, optional): DictionaryApi object instance.
-                If None, auto-detection is used for all columns.  If supplied,
-                it is used only as a fallback for columns that cannot be typed
-                from their values (e.g. all-sentinel columns). Defaults to None.
+            dictionaryApi (object): DictionaryApi object instance
             storeStringsAsBytes (bool, optional): strings are stored as lists of bytes. Defaults to False.
             defaultStringEncoding (str, optional): default encoding for string data. Defaults to "utf-8".
-            applyTypes (bool, optional): apply explicit data typing before encoding.
-                Ignored when dictionaryApi is None (auto-detection does not need pre-casting).
-                Defaults to True.
+            applyTypes (bool, optional): apply explicit data typing before encoding. Defaults to True.
             useStringTypes (bool, optional): assume all types are string. Defaults to False.
             useFloat64 (bool, optional): store floats with 64 bit precision. Defaults to False.
-            copyInputData (bool, optional): make a new copy of input data. Defaults to False.
-            ignoreCastErrors (bool, optional): suppress errors when casting attribute types. Defaults to False.
-            applyMolStarTypes (bool, optional): If applyTypes is used, will use specific molstar hints. Defaults to True.
+            copyInputData (bool, optional): make a new copy input data. Defaults to False.
+            ignoreCastErrors (bool, optional): suppress errors when casting attribute types with dictionaryApi. Defaults to False.
+            applyMolStarTypes: (bool, optional): If applyTypes is used, will use specific molstar hints. Defaults to True.
         """
         self.__version = "0.3.0"
         self.__storeStringsAsBytes = storeStringsAsBytes
@@ -71,7 +54,7 @@ class BinaryCifWriter(object):
         self.__applyTypes = applyTypes
         self.__useStringTypes = useStringTypes
         self.__useFloat64 = useFloat64
-        self.__dApi = dictionaryApi          # may be None
+        self.__dApi = dictionaryApi
         self.__copyInputData = copyInputData
         self.__ignoreCastErrors = ignoreCastErrors
         self.__applyMolStarTypes = kwargs.get("applyMolStarTypes", True)
@@ -84,6 +67,9 @@ class BinaryCifWriter(object):
             filePath (str): output file path
             containerList (list): list of DataContainer objects
         """
+        dataTypeList = []
+        dataTypeList.append("New Run\n")
+
         try:
             blocks = []
             for container in containerList:
@@ -93,10 +79,7 @@ class BinaryCifWriter(object):
                 blocks.append(block)
                 for catName in container.getObjNameList():
                     cObj = container.getObj(catName)
-                    # Only apply DataCategoryTyped pre-casting when a dictionaryApi
-                    # is available.  Auto-detection works on raw string values and
-                    # does not need values to be pre-cast.
-                    if self.__applyTypes and self.__dApi is not None:
+                    if self.__applyTypes:
                         cObj = DataCategoryTyped(cObj, dictionaryApi=self.__dApi, copyInputData=self.__copyInputData,
                                                  ignoreCastErrors=self.__ignoreCastErrors, applyMolStarTypes=self.__applyMolStarTypes)
                     #
@@ -105,7 +88,11 @@ class BinaryCifWriter(object):
                     cols = []
                     for ii, atName in enumerate(cObj.getAttributeList()):
                         colDataList = cObj.getColumn(ii)
-                        dataType = self.__getAttributeType(cObj, atName, colDataList) if not self.__useStringTypes else "string"
+                        dataType = self.__getAttributeType(cObj, atName) if not self.__useStringTypes else "string"
+
+                        fullAttrName = "_%s.%s" % (catName, atName)
+                        dataTypeList.append(fullAttrName + ": " + dataType)
+
                         logger.debug("catName %r atName %r dataType %r", catName, atName, dataType)
                         colMaskDict, encodedColDataList, encodingDictL = self.__encodeColumnData(colDataList, dataType)
                         cols.append(
@@ -124,6 +111,11 @@ class BinaryCifWriter(object):
             }
             with open(filePath, "wb") as ofh:
                 msgpack.pack(data, ofh)
+            
+            with open("dataType_dict.txt", "a") as f:
+                for item in dataTypeList:
+                    f.write(item + "\n")
+            
             return True
         except Exception as e:
             logger.exception("Failing with %s", str(e))
@@ -136,28 +128,6 @@ class BinaryCifWriter(object):
         maskEncoderList = ["RunLength", "ByteArray"]
         typeEncoderD = {"string": "StringArrayMasked", "integer": "IntArrayMasked", "float": "FloatArrayMasked"}
         colMaskList = enc.getMask(colDataList)
-
-        # When no dictionaryApi pre-casting (DataCategoryTyped) was applied, column
-        # values arrive as raw strings.  The integer and float encoders call
-        # struct.pack which requires actual int/float Python objects — not strings.
-        # Cast here using the dataType already determined by __getAttributeType().
-        # Sentinel values (".", "?", None) are left untouched so getMask() results
-        # remain valid; the encoders substitute 0 / 0.0 for masked positions.
-        _SENTINELS = {".", "?"}
-        if dataType == "integer":
-            colDataList = [
-                v if (v is None or v in _SENTINELS)
-                else (v if isinstance(v, int) else int(v))
-                for v in colDataList
-            ]
-        elif dataType == "float":
-            colDataList = [
-                v if (v is None or v in _SENTINELS)
-                else (v if isinstance(v, float) else float(v))
-                for v in colDataList
-            ]
-        # dataType == "string" needs no casting — encoder handles str directly
-
         dataEncType = typeEncoderD[dataType]
         colDataEncoded, colDataEncodingDictL = enc.encodeWithMask(colDataList, colMaskList, dataEncType)
         if colMaskList:
@@ -168,7 +138,7 @@ class BinaryCifWriter(object):
         return colMaskDict, colDataEncoded, colDataEncodingDictL
 
     def __toBytes(self, strVal):
-        """Optional conversion of the input string to bytes according to the class setting.
+        """Optional conversion of the input string to bytes according to the class setting (storeStringsAsBytes).
 
         Args:
             strVal (string): input string
@@ -182,81 +152,26 @@ class BinaryCifWriter(object):
             logger.exception("Bad type for %r", strVal)
         return strVal
 
-    # Attributes whose values look numeric but must always be encoded as strings.
-    # These are declared as primitive type "char" in the PDBx/mmCIF dictionary,
-    # meaning auto-detection would wrongly classify them as int or float.
-    # Mirrors the forced-string behaviour in the RCSB PDB binaryCIF writer.
-    #
-    # Key format: "category.attribute"  (category name without leading underscore)
-    _FORCE_STRING_ATTRS = frozenset({
-        # Version strings like "5.281" look like floats but are identifiers.
-        "audit_conform.dict_version",
-        # URL / path strings that may contain only digits in rare cases.
-        "audit_conform.dict_location",
-        # Dictionary name — always a plain string.
-        "audit_conform.dict_name",
-    })
-
-    def __getAttributeType(self, dObj, atName, colDataList):
-        """Determine attribute data type (string, integer, or float).
-
-        Resolution order
-        ----------------
-        0. Forced-string override table — checked before anything else.
-           Certain attributes are always encoded as strings regardless of
-           their values (e.g. _audit_conform.dict_version = "5.281" looks
-           like a float but is a char type per the PDBx/mmCIF dictionary).
-
-        1. Auto-detection via classify_column() — runs for all other attributes.
-           Scans the actual column values; no external dependency.
-
-        2. dictionaryApi fallback — used only when auto-detection cannot
-           determine a type (all-sentinel column, empty column).
-           Skipped entirely when self.__dApi is None.
-
-        3. MolStar integer hints override — applied last, same as original,
-           only when applyTypes=True and applyMolStarTypes=True.
+    def __getAttributeType(self, dObj, atName):
+        """Get attribute data type (string, integer, or float) and optionality
 
         Args:
-            dObj:        DataCategory object
-            atName:      attribute name string
-            colDataList: raw column value list (used for auto-detection)
+            atName (str): attribute name
 
         Returns:
-            str: "string" | "integer" | "float"
+            (string): data type (string, integer or float)
         """
-        # --- Step 0: forced-string override ---
-        atKey = "%s.%s" % (dObj.getName().lower(), atName.lower())
-        if atKey in self._FORCE_STRING_ATTRS:
-            logger.debug("Force-string override applied for %s", atKey)
-            return "string"
+        cifDataType = self.__dApi.getTypeCode(dObj.getName(), atName)
+        # cifPrimitiveType = self.__dApi.getTypePrimitive(dObj.getName(), atName)
+        if cifDataType is None:
+            dataType = "string"
+            if not self.__ignoreCastErrors:
+                logger.warning("Undefined type for category %s attribute %s - Will treat as string", dObj.getName(), atName)
+        else:
+            dataType = self.__dch.getPdbxItemType(cifDataType)
+            # dataType = "integer" if "int" in cifDataType else "float" if cifPrimitiveType == "numb" else "string"
 
-        # --- Step 1: auto-detect from actual column values ---
-        profile = classify_column(colDataList)
-
-        # Map ColumnProfile.col_type to the three-way string the encoder expects
-        _type_map = {"int": "integer", "float": "float", "str": "string"}
-        dataType = _type_map[profile.col_type]
-
-        # --- Step 2: dictionaryApi fallback for all-sentinel / empty columns ---
-        # If auto-detection returned "string" only because the column was empty
-        # or entirely sentinels, use the declared type from the dictionary when
-        # available — it's better than silently defaulting to string encoding.
-        if profile.value_count == 0 and self.__dApi is not None:
-            cifDataType = self.__dApi.getTypeCode(dObj.getName(), atName)
-            if cifDataType is not None:
-                dataType = self.__dch.getPdbxItemType(cifDataType)
-                logger.debug(
-                    "Empty/all-sentinel column %s.%s — using dictionary type %r",
-                    dObj.getName(), atName, dataType,
-                )
-            else:
-                logger.debug(
-                    "Empty/all-sentinel column %s.%s — no dictionary type, defaulting to string",
-                    dObj.getName(), atName,
-                )
-
-        # --- Step 3: MolStar integer hints (unchanged from original) ---
+        # Only if applying types, do we allow Mol* hints
         if self.__applyTypes and self.__applyMolStarTypes:
             nm = CifName().itemName(dObj.getName(), atName)
             if self.__dch.inMolStarIntHints(nm):
@@ -295,6 +210,13 @@ class BinaryCifEncoders(object):
     """
 
     def __init__(self, defaultStringEncoding="utf-8", storeStringsAsBytes=True, useFloat64=False):
+        """Instantiate the binary CIF encoder class.
+
+        Args:
+            defaultStringEncoding (str, optional): default encoding for string data . Defaults to "utf-8".
+            storeStringsAsBytes (bool, optional): strings are stored as bytes. Defaults to True.
+            useFloat64 (bool, optional): store floats in 64 bit precision. Defaults to True.
+        """
         self.__unknown = [".", "?"]
         self.__defaultStringEncoding = defaultStringEncoding
         self.__storeStringsAsBytes = storeStringsAsBytes
@@ -302,17 +224,30 @@ class BinaryCifEncoders(object):
         self.__bCifTypeCodeD = {v: k for k, v in BinaryCifDecoders.bCifCodeTypeD.items()}
 
     def __getDataType(self, colTypedDataList):
+        """Returns type of data array - or 'integer_32' """
         if colTypedDataList.dtype:
             return colTypedDataList.dtype
         else:
             return "integer_32"
 
     def encode(self, colDataList, encodingTypeList, dataType):
+        """Encode the data using the input list of encoding types returning encoded data and encoding instructions.
+
+        Args:
+            colDataList (list or TypedArray): input data to be encoded
+            encodingTypeList (list): list of encoding types (ByteArray, Delta, or RunLength)
+            dataType (string):  column input data type (string, integer, float)
+
+        Returns:
+            (list, list ): encoded data column, list of encoding instructions
+        """
         encodingDictL = []
+
         legacy = False
         if type(colDataList) is list:
             colDataList = TypedArray(colDataList)
             legacy = True
+
         encDict = None
         for encType in encodingTypeList:
             if encType == "ByteArray":
@@ -332,6 +267,16 @@ class BinaryCifEncoders(object):
         return colDataList, encodingDictL
 
     def encodeWithMask(self, colDataList, colMaskList, encodingType):
+        """Encode the data using the input mask and encoding type returning encoded data and encoding instructions.
+
+        Args:
+            colDataList (string): input data column
+            colMaskList (list): incompleteness mask for the input data column
+            encodingType (string): encoding type to apply (StringArrayMask, IntArrayMasked, FloatArrayMasked)
+
+        Returns:
+            (list, list ): encoded data column, list of encoding instructions
+        """
         encodedColDataList = []
         encodingDictL = []
         if encodingType == "StringArrayMasked":
@@ -345,16 +290,19 @@ class BinaryCifEncoders(object):
         return encodedColDataList, encodingDictL
 
     def __getIntegerPackingType(self, colDataList):
+        """Determine the integer packing type of the input integer data list"""
         try:
             minV = min(colDataList)
             maxV = max(colDataList)
             if minV >= 0:
+                # Unsigned types
                 for typeName in ["unsigned_integer_8", "unsigned_integer_16", "unsigned_integer_32"]:
                     byteArrayType = self.__bCifTypeCodeD[typeName]
                     upperLimit = BinaryCifDecoders.bCifTypeD[typeName]["max"]
                     if maxV <= upperLimit:
                         return byteArrayType
             else:
+                # Signed types
                 for typeName in ["integer_8", "integer_16", "integer_32"]:
                     byteArrayType = self.__bCifTypeCodeD[typeName]
                     upperLimit = BinaryCifDecoders.bCifTypeD[typeName]["max"]
@@ -366,12 +314,31 @@ class BinaryCifEncoders(object):
         raise TypeError("Cannot determine integer packing type")
 
     def byteArrayEncoder(self, colDataList, dataType):
+        """Encode integer or float list in a packed byte array.
+
+        Args:
+            data (list): list of integer or float data
+            dataType (str): data type (integer|float)
+
+        Returns:
+            bytes: byte encoded packed data
+        """
         warnings.warn("byteArrayEncode should be replaced with typed encoder.  This will be removed in 2026.", DeprecationWarning)
         colDataListTyped = TypedArray(colDataList)
+
         cList, encDict = self.byteArrayEncoderTyped(colDataListTyped, dataType)
         return cList.data, encDict
 
     def byteArrayEncoderTyped(self, colTypedDataList, dataType):
+        """Encode integer or float list in a packed byte array.
+
+        Args:
+            data (TypedArray): list of integer or float data
+            dataType (str): data type (integer|float)
+
+        Returns:
+            TypedArray: byte encoded packed data
+        """
         if dataType == "float":
             byteArrayType = self.__bCifTypeCodeD["float_64"] if self.__useFloat64 else self.__bCifTypeCodeD["float_32"]
         else:
@@ -381,21 +348,44 @@ class BinaryCifEncoders(object):
                 byteArrayType = self.__getIntegerPackingType(colTypedDataList.data)
         encodingD = {self.__toBytes("kind"): self.__toBytes("ByteArray"), self.__toBytes("type"): byteArrayType}
         fmt = BinaryCifDecoders.bCifTypeD[BinaryCifDecoders.bCifCodeTypeD[byteArrayType]]["struct_format_code"]
+        # Data are encoded little-endian '<'
         encodedData = struct.pack("<" + fmt * len(colTypedDataList.data), *colTypedDataList.data)
         encodedTypedData = TypedArray(encodedData)
         return encodedTypedData, encodingD
 
     def deltaEncoder(self, colDataList, minLen=40):
+        """Encode an integer list as a list of consecutive differences.
+
+        Args:
+            colDataList (list): list of integer data
+            minLen (int, optional): minimum list length to apply encoder. Defaults to 40.
+
+        Returns:
+            list: delta encoded integer list
+        """
         warnings.warn("deltaEncoder should be replaced with typed encoder.  This will be removed in 2026.", DeprecationWarning)
         colDataListTyped = TypedArray(colDataList)
+
         cList, encDict = self.deltaEncoderTyped(colDataListTyped, minLen)
         return cList.data, encDict
 
     def deltaEncoderTyped(self, colTypedDataList, minLen=40):
+        """Encode an integer list as a list of consecutive differences.
+
+        Args:
+            colTypedDataList (list): list of integer data
+            minLen (int, optional): minimum list length to apply encoder. Defaults to 40.
+
+        Returns:
+            TypedArray: delta encoded integer list (integer_8, integer_16, integer_32)
+        """
+
         if colTypedDataList.dtype and colTypedDataList.dtype not in ["integer_8", "integer_16", "integer_32"]:
             raise TypeError("Only signed integer types can be encoded with delta encoder: %s" % colTypedDataList.dtype)
+
         if len(colTypedDataList.data) <= minLen:
             return colTypedDataList, None
+
         byteArrayType = self.__getDataType(colTypedDataList)
         encodingD = {self.__toBytes("kind"): self.__toBytes("Delta"), self.__toBytes("origin"): colTypedDataList.data[0], self.__toBytes("srcType"): self.__bCifTypeCodeD[byteArrayType]}
         encodedColDataList = [0] + [colTypedDataList.data[i] - colTypedDataList.data[i - 1] for i in range(1, len(colTypedDataList.data))]
@@ -403,15 +393,38 @@ class BinaryCifEncoders(object):
         return encodedTypedColDataList, encodingD
 
     def runLengthEncoder(self, colDataList, minLen=40):
+        """Encode an integer array as pairs of (value, number of repeats)
+
+        Args:
+            colDataList (list): list of integer data
+            minLen (int, optional): minimum list length to apply encoder. Defaults to 40.
+
+        Returns:
+            list: runlength encoded integer list
+        """
         warnings.warn("runLengthEncoder should be replaced with typed encoder.  This will be removed in 2026.", DeprecationWarning)
+
         colDataListTyped = TypedArray(colDataList)
+
         cList, encDict = self.runLengthEncoderTyped(colDataListTyped, minLen)
         return cList.data, encDict
 
     def runLengthEncoderTyped(self, colTypedDataList, minLen=40):
+        """Encode an integer array as pairs of (value, number of repeats)
+
+        Args:
+            colTypedDataList (TypedArray): list of integer data (signed and unsigned 8/16/32 bit types)
+            minLen (int, optional): minimum list length to apply encoder. Defaults to 40.
+
+        Returns:
+            TypedArray: runlength encoded integer list (integer_32)
+        """
+
         if len(colTypedDataList.data) <= minLen:
             return colTypedDataList, None
+
         srcType = self.__getDataType(colTypedDataList)
+
         encodingD = {self.__toBytes("kind"): self.__toBytes("RunLength"), self.__toBytes("srcType"): self.__bCifTypeCodeD[srcType],
                      self.__toBytes("srcSize"): len(colTypedDataList.data)}
         encodedColDataList = []
@@ -426,6 +439,7 @@ class BinaryCifEncoders(object):
             else:
                 repeat += 1
         encodedColDataList.extend((val, repeat))
+        # Check for any gains and possibly retreat
         if len(encodedColDataList) > len(colTypedDataList.data):
             return colTypedDataList, None
         else:
@@ -433,8 +447,17 @@ class BinaryCifEncoders(object):
             return encodedTypedColDataList, encodingD
 
     def stringArrayMaskedEncoder(self, colDataList, colMaskList):
+        """Encode the input data column (string) along with the incompleteness mask.
+
+        Args:
+            colDataList (list): input data column (string)
+            colMaskList (list): incompleteness mask
+
+        Returns:
+            (list, list): encoded data column, list of encoding instructions
+        """
         integerEncoderList = ["Delta", "RunLength", "IntegerPacking", "ByteArray"]
-        uniqStringIndex = {}
+        uniqStringIndex = {}  # keys are substrings, values indices
         uniqStringList = []
         indexList = []
         for i, strVal in enumerate(colDataList):
@@ -452,8 +475,10 @@ class BinaryCifEncoders(object):
         for tS in uniqStringList:
             runningLen += len(tS)
             offsetList.append(runningLen)
+
         encodedOffsetList, offsetEncodingDictL = self.encode(offsetList, integerEncoderList, "integer")
         encodedIndexList, indexEncodingDictL = self.encode(indexList, integerEncoderList, "integer")
+
         encodingDict = {
             self.__toBytes("kind"): self.__toBytes("StringArray"),
             self.__toBytes("dataEncoding"): indexEncodingDictL,
@@ -464,8 +489,20 @@ class BinaryCifEncoders(object):
         return encodedIndexList, [encodingDict]
 
     def intArrayMaskedEncoder(self, colDataList, colMaskList):
+        """Encode the input data column (integer) along with the incompleteness mask.
+
+        Args:
+            colDataList (list): input data column (string)
+            colMaskList (list): incompleteness mask
+
+        Returns:
+            (list, list): encoded data column, list of encoding instructions
+        """
         integerEncoderList = ["Delta", "RunLength", "IntegerPacking", "ByteArray"]
+
         if colMaskList:
+            # Mol* and BinaryCif specification https://github.com/molstar/BinaryCIF/blob/master/encoding.md
+            # indcates that masked (missing) data are encoded as 0
             maskedColDataList = [0 if m else d for m, d in zip(colMaskList, colDataList)]
         else:
             maskedColDataList = colDataList
@@ -473,7 +510,17 @@ class BinaryCifEncoders(object):
         return encodedColDataList, encodingDictL
 
     def floatArrayMaskedEncoder(self, colDataList, colMaskList):
+        """Encode the input data column (float) along with the incompleteness mask.
+
+        Args:
+            colDataList (list): input data column (string)
+            colMaskList (list): incompleteness mask
+
+        Returns:
+            (list, list): encoded data column, list of encoding instructions
+        """
         floatEncoderList = ["ByteArray"]
+
         if colMaskList:
             maskedColDataList = [0.0 if m else d for m, d in zip(colMaskList, colDataList)]
         else:
@@ -482,6 +529,15 @@ class BinaryCifEncoders(object):
         return encodedColDataList, encodingDictL
 
     def getMask(self, colDataList):
+        """Create an incompleteness mask list identifying missing/omitted values in the input data column.
+        The mask is assigned: 0 = Value is present, 1 = '.' (value not specified), and 2 = '?' (value unknown).
+
+        Args:
+            colDataList (list): input data column
+
+        Returns:
+            list or None: mask list or None if the column contains no missing values
+        """
         mask = None
         for ii, colVal in enumerate(colDataList):
             if colVal is not None and colVal not in self.__unknown:
@@ -492,14 +548,31 @@ class BinaryCifEncoders(object):
         return mask
 
     def __toBytes(self, strVal):
+        """Optional conversion of the input string to bytes according to the class setting (storeStringsAsBytes).
+
+        Args:
+            strVal (string): input string
+
+        Returns:
+            string or bytes: optionally converted string.
+        """
         try:
             return strVal.encode(self.__defaultStringEncoding) if self.__storeStringsAsBytes else strVal
         except (UnicodeDecodeError, AttributeError):
             logger.exception("Bad type for %r", strVal)
         return strVal
 
+    # Support for IntegerPacking
     def _determine_packing(self, colDataList):
+        """Determines what the optimal IntegerPacking will be for a set of data.
+        IntegerPacking allows for values above maximum by duplicating MaxV, so it is not simply based on the maximum value.
+
+        Return information on data length and bytes per element.
+
+        """
+
         def packing_size_signed(colDataList, upper_limit):
+            """For signed data, determine packing with upper_limit, allowing repeats of max_val"""
             lower_limit = -upper_limit - 1
             size = 0
             for colVal in colDataList:
@@ -510,6 +583,7 @@ class BinaryCifEncoders(object):
             return size + len(colDataList)
 
         def packing_size_unsigned(colDataList, upper_limit):
+            """For unsigned data, determine packing with upper_limit, allowing repeats of max_val"""
             size = 0
             for colVal in colDataList:
                 size += int(colVal / upper_limit)
@@ -518,42 +592,78 @@ class BinaryCifEncoders(object):
         try:
             minV = min(colDataList)
             is_signed = True if minV < 0 else False
-            size8  = packing_size_signed(colDataList, 0x7F)   if is_signed else packing_size_unsigned(colDataList, 0xFF)
+
+            size8 = packing_size_signed(colDataList, 0x7F) if is_signed else packing_size_unsigned(colDataList, 0xFF)
             size16 = packing_size_signed(colDataList, 0x7FFF) if is_signed else packing_size_unsigned(colDataList, 0xFFFF)
             dlen = len(colDataList)
+
+            # Determine optimal packing
             if dlen * 4 < size16 * 2:
-                size = dlen;  nbytes = 4
+                size = dlen
+                nbytes = 4
+
             elif size16 * 2 < size8:
-                size = size16; nbytes = 2
+                size = size16
+                nbytes = 2
+
             else:
-                size = size8;  nbytes = 1
+                size = size8
+                nbytes = 1
+
             return {"size": size, "bytes": nbytes, "isSigned": is_signed}
+
         except Exception as e:
             logger.exception("Failing with %s", str(e))
         raise TypeError("Cannot determine integer packing type")
 
     def integerPackingEncoder(self, colDataList):
+        """Encode a 32-bit integer array as 8-bit or 16-bit encoding
+
+        Args:
+            colDataList (list): list of integer data
+
+        Returns:
+            list: packed encoded 8-bit/16-bit integer list
+        """
         warnings.warn("integerPackingEncoder should be replaced with typed encoder.  This will be removed in 2026.", DeprecationWarning, 4)
         colDataListTyped = TypedArray(colDataList)
+
         cList, encDict = self.integerPackingEncoderTyped(colDataListTyped)
         return cList.data, encDict
 
     def integerPackingEncoderTyped(self, colTypedDataList):
+        """Encode a 32-bit integer array as 8-bit or 16-bit encoding
+
+        Args:
+            colTypedDataList (TypedArray): list of integer data (integer_32 required)
+
+        Returns:
+            TypedArray: packed encoded 8-bit/16-bit integer list
+        """
         if colTypedDataList.dtype and colTypedDataList.dtype not in ["integer_32"]:
             raise TypeError("Only integer-32 can be encoded with delta encoder: %s" % colTypedDataList.dtype)
+
         packing = self._determine_packing(colTypedDataList.data)
-        nbytes   = packing["bytes"]
+        nbytes = packing["bytes"]
         isSigned = packing["isSigned"]
+
         if nbytes == 4:
+            # no packing done, Int32 encoding will be used
+            # We will not be packing - as already integer 32 on way in
             return colTypedDataList, None
+
         encodingD = {self.__toBytes("kind"): self.__toBytes("IntegerPacking"), self.__toBytes("byteCount"): nbytes,
                      self.__toBytes("srcSize"): len(colTypedDataList.data), self.__toBytes("isUnsigned"): not isSigned}
         encodedColDataList = []
+
         if isSigned:
             upper_limit = 0x7F if nbytes == 1 else 0x7FFF
         else:
             upper_limit = 0xFF if nbytes == 1 else 0xFFFF
+
         lower_limit = -upper_limit - 1
+
+        # Pack data
         for colVal in colTypedDataList.data:
             if colVal >= 0:
                 while colVal >= upper_limit:
@@ -563,11 +673,15 @@ class BinaryCifEncoders(object):
                 while colVal <= lower_limit:
                     encodedColDataList.append(lower_limit)
                     colVal -= lower_limit
+
             encodedColDataList.append(colVal)
-        byteArrayType = None
+
+        byteArrayType = None  # Should never happen, but keep pylint happy. 4 bytes handled above
         if nbytes == 1:
             byteArrayType = "integer_8" if isSigned else "unsigned_integer_8"
         elif nbytes == 2:
             byteArrayType = "integer_16" if isSigned else "unsigned_integer_16"
+
         encodedTypedColDataList = TypedArray(encodedColDataList, byteArrayType)
+
         return encodedTypedColDataList, encodingD

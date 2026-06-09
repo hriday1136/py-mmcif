@@ -1,13 +1,8 @@
 ##
 #
-# File:    testBinaryCifWriter.py
+# File:    testBinaryCifWriter_dictionary.py
 # Author:  J. Westbrook
 # Date: 16-May-2021
-#
-# Updates:
-#   - dictionaryApi and DataCategoryTyped removed.
-#     Type resolution is now handled entirely by bcif_type_detector.classify_column()
-#     inside BinaryCifWriter.  No dictionary file needs to be loaded at test time.
 ##
 
 import logging
@@ -18,12 +13,12 @@ from io import StringIO
 import unittest
 import msgpack
 
-# DataCategoryTyped and DictionaryApi are no longer needed —
-# BinaryCifWriter uses bcif_type_detector for all type resolution.
+from mmcif.api.DataCategoryTyped import DataCategoryTyped
+from mmcif.api.DictionaryApi import DictionaryApi
 from mmcif.api.DataCategory import DataCategory
 from mmcif.api.PdbxContainers import DataContainer
 from mmcif.io.BinaryCifReader import BinaryCifReader
-from mmcif.io.BinaryCifWriter import BinaryCifWriter
+from mmcif.io.BinaryCifWriter_dictionary import BinaryCifWriter_dictionary
 from mmcif.io.IoAdapterPy import IoAdapterPy as IoAdapter
 from mmcif.tests.BcifPrint import BcifPrint
 
@@ -48,6 +43,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
+# The following is from https://stackoverflow.com/questions/7472863/pydev-unittesting-how-to-capture-text-logged-to-a-logging-logger-in-captured-o
 class CaptureLogger:
     """Context manager to capture `logging` streams
 
@@ -76,18 +72,23 @@ class CaptureLogger:
         return f"captured: {self.out}\n"
 
 
-class BinaryCifWriterTests(unittest.TestCase):
+class BinaryCifWriter_dictionaryTests(unittest.TestCase):
     def setUp(self):
+        #
         self.__pathOutputDir = os.path.join(HERE, "test-output")
         self.__baseCifUrl = "https://files.rcsb.org/download/"
-        self.__testCifList = ["4BTS"]
-        self.__testBcifOutput = os.path.join(self.__pathOutputDir, "4bts-with_autoDetect.bcif")
-        self.__testBcifTranslated = os.path.join(self.__pathOutputDir, "4bts-generated-translated.bcif")
-        self.__testBcifTypeOutput = os.path.join(self.__pathOutputDir, "4bts-type-generated.bcif")
+        # 8CCS caused failure to decode
+        self.__testCifList = ["4HHB"]
+        self.__testBcifOutput = os.path.join(self.__pathOutputDir, "4hhb-py_generated.bcif")
+        self.__testBcifTranslated = os.path.join(self.__pathOutputDir, "4hhb-generated-translated.bcif")
+        self.__testBcifTypeOutput = os.path.join(self.__pathOutputDir, "4hhb-type-generated.bcif")
 
-        # dictionaryApi removed — BinaryCifWriter now uses bcif_type_detector
-        # for all type resolution.  No dictionary file needs to be loaded.
-
+        #
+        self.__pathPdbxDictionary = os.path.join(HERE, "data", "mmcif_pdbx_v5_next.dic")
+        myIo = IoAdapter(raiseExceptions=True)
+        self.__containerList = myIo.readFile(inputFilePath=self.__pathPdbxDictionary)
+        self.__dApi = DictionaryApi(containerList=self.__containerList, consolidate=True)
+        #
         self.__floatTolerance = 1.0e-10
         self.__startTime = time.time()
         logger.debug("Running tests on version %s", __version__)
@@ -103,30 +104,31 @@ class BinaryCifWriterTests(unittest.TestCase):
                 cifFileUrl = os.path.join(self.__baseCifUrl, cifId + ".cif")
                 for storeStringsAsBytes in [True, False]:
                     logger.info("serializing cif %s (storeStringAsBytes %r)", cifFileUrl, storeStringsAsBytes)
-
+                    tcL = []
                     ioPy = IoAdapter()
                     containerList = ioPy.readFile(cifFileUrl)
-
-                    # DataCategoryTyped pre-casting removed.
-                    # The writer's __encodeColumnData() now casts values to the
-                    # correct Python type (int/float) based on the profile returned
-                    # by classify_column(), so raw DataCategory objects can be
-                    # passed directly without a prior DataCategoryTyped pass.
-
-                    # No dictionaryApi argument — auto-detection handles all columns.
-                    bcw = BinaryCifWriter(storeStringsAsBytes=storeStringsAsBytes, useFloat64=True)
-                    bcw.serialize(self.__testBcifOutput, containerList)
-
+                    for container in containerList:
+                        cName = container.getName()
+                        tc = DataContainer(cName)
+                        for catName in container.getObjNameList():
+                            dObj = container.getObj(catName)
+                            tObj = DataCategoryTyped(dObj, dictionaryApi=self.__dApi, copyInputData=True, applyMolStarTypes=False)
+                            tc.append(tObj)
+                        tcL.append(tc)
+                    #
+                    bcw = BinaryCifWriter_dictionary(self.__dApi, storeStringsAsBytes=storeStringsAsBytes, applyTypes=False, useFloat64=True)
+                    bcw.serialize(self.__testBcifOutput, tcL)
                     self.assertEqual(containerList[0], containerList[0])
+                    self.assertEqual(tcL[0], tcL[0])
 
                     self.__verifyEncoding(self.__testBcifOutput, storeStringsAsBytes)
                     bcr = BinaryCifReader(storeStringsAsBytes=storeStringsAsBytes)
                     cL = bcr.deserialize(self.__testBcifOutput)
-
+                    #
                     ioPy = IoAdapter()
                     ok = ioPy.writeFile(self.__testBcifTranslated, cL)
                     self.assertTrue(ok)
-                    self.assertTrue(self.__same(containerList[0], cL[0]))
+                    self.assertTrue(self.__same(tcL[0], cL[0]))
         except Exception as e:
             logger.exception("Failing with %s", str(e))
             self.fail()
@@ -143,109 +145,76 @@ class BinaryCifWriterTests(unittest.TestCase):
             sys.stderr.write("Failure %s\n" % fname)
         self.assertFalse(err)
 
-    @staticmethod
-    def __normVal(v):
-        """Normalise a single cell value to a comparable string.
-
-        The original CIF reader returns all values as strings (e.g. '1').
-        The bcif decoder returns typed values (e.g. int 1 or float 1.0).
-        Normalising both sides to strings makes the comparison type-agnostic
-        while still catching genuine data differences.
-
-        Floats are rounded to 3 decimal places to absorb FixedPoint
-        encode/decode rounding noise (e.g. 1.234 -> 1234 -> 1.234000001).
-        """
-        if v is None:
-            return "?"
-        s = str(v).strip()
-        if s in (".", "?", ""):
-            return s
-        try:
-            return "{:.3f}".format(float(s))
-        except (ValueError, TypeError):
-            return s.lower()
-
     def __same(self, cA, cB):
-        """Compare two DataContainer objects value by value.
+        """[summary]
 
         Args:
-            cA (DataContainer): source container (from original CIF read)
-            cB (DataContainer): decoded container (from bcif round-trip)
+            cA (DataCategoryTyped): object
+            cB (DataCategory): object
 
         Returns:
-            bool: True if all categories, attributes, and values match.
-
-        Note: values are normalised to strings before comparison so that
-        type differences introduced by the encode/decode round-trip
-        (e.g. '1' vs int 1, '1.234' vs float 1.234) do not cause false
-        failures.  This is correct because the source of truth is always
-        the string representation from the original CIF file.
+            [type]: [description]
         """
         if cA.getName() != cB.getName():
-            logger.info("name(A) %s ne name(B) %s", cA.getName(), cB.getName())
+            logger.info("name(A) %s ne name(B) %s", cA.getName(), cA.getName())
             return False
-
         aNmL = cA.getObjNameList()
         bNmL = cB.getObjNameList()
-
         if len(aNmL) != len(bNmL):
             logger.info("length(A) %r ne length(B) %r", len(aNmL), len(bNmL))
             return False
-
-        if sorted(aNmL) != sorted(bNmL):
-            logger.info("sorted name list(A) ne name list(B) %r", set(aNmL) - set(bNmL))
+        #
+        if sorted(bNmL) != sorted(bNmL):
+            logger.info("sorted  name list(A) ne name list(B) %r", set(aNmL) - set(bNmL))
             return False
-
-        if aNmL != bNmL:
+        if bNmL != bNmL:
             logger.info("unsorted name list(A) ne name list(B) %r", set(aNmL) - set(bNmL))
             return False
-
         for aNm in aNmL:
             aObj = cA.getObj(aNm)
             bObj = cB.getObj(aNm)
-
+            # if aObj != bObj:
+            #    logger.info("object(a) %r ne object(b) %r", aObj.getName(), bObj.getName())
+            #    logger.info("aObj.__dict__ %r", aObj.__dict__)
+            #    logger.info("bObj.__dict__ %r", bObj.__dict__)
             ta, _, tb = aObj.cmpAttributeNames(bObj)
             if ta or tb:
                 logger.info("attributes differ (a not b) %r  (b not a) %r", ta, tb)
                 return False
 
-            for atName in aObj.getAttributeList():
-                ii = aObj.getAttributeIndex(atName)
-                jj = bObj.getAttributeIndex(atName)
-                aCol = aObj.getColumn(ii)
-                bCol = bObj.getColumn(jj)
-
-                if len(aCol) != len(bCol):
-                    logger.info("row count differs for attribute %r: %d vs %d",
-                                atName, len(aCol), len(bCol))
-                    return False
-
-                for row, (av, bv) in enumerate(zip(aCol, bCol)):
-                    na = self.__normVal(av)
-                    nb = self.__normVal(bv)
-                    if na != nb:
-                        logger.info("values differ for attribute %r at row %d: "
-                                    "%r (cif) vs %r (bcif)", atName, row, av, bv)
+            vDiffL = aObj.cmpAttributeValues(bObj, ignoreOrder=False, floatAbsTolerance=self.__floatTolerance, floatRelTolerance=self.__floatTolerance)
+            #
+            if vDiffL:
+                for vDiff in vDiffL:
+                    if not vDiff[1]:
+                        logger.info("values differ for attribute %r", vDiff[0])
+                        #
+                        ii = aObj.getAttributeIndex(vDiff[0])
+                        aCol = aObj.getColumn(ii)
+                        jj = bObj.getAttributeIndex(vDiff[0])
+                        bCol = bObj.getColumn(jj)
                         logger.info("aCol %r", aCol)
                         logger.info("bCol %r", bCol)
-                        return False
 
+                        #
+                        return False
+        #
         return True
 
     def testItemTypes(self):
-        """Tests that string-valued columns encode without cast errors."""
+        """Tests int vs string types based on dictionary type"""
         myDataList = []
         curContainer = DataContainer("myblock")
         aCat = DataCategory("em_single_particle_entity")
         aCat.appendAttribute("point_symmetry")
-        aCat.append(["I", ])
+        aCat.append(["I", ])  # , because of single value in tuple
         curContainer.append(aCat)
+
         myDataList.append(curContainer)
 
-        # No dictionaryApi argument — auto-detection classifies "I" as string
-        # correctly without needing the dictionary to declare the type.
-        bcw = BinaryCifWriter(useStringTypes=True)
+        bcw = BinaryCifWriter_dictionary(self.__dApi, useStringTypes=True)
 
+        # The older code would log a cast error
         with CaptureLogger(logger) as cl:
             bcw.serialize(self.__testBcifTypeOutput, myDataList)
         self.assertNotIn("Cast error", cl.out)
@@ -253,11 +222,13 @@ class BinaryCifWriterTests(unittest.TestCase):
 
 def suiteBcifWriter():
     suiteSelect = unittest.TestSuite()
-    suiteSelect.addTest(BinaryCifWriterTests("testSerialize"))
-    suiteSelect.addTest(BinaryCifWriterTests("testItemTypes"))
+    suiteSelect.addTest(BinaryCifWriter_dictionaryTests("testSerialize"))
+    suiteSelect.addTest(BinaryCifWriter_dictionaryTests("testItemTypes"))
+
     return suiteSelect
 
 
 if __name__ == "__main__":
+
     mySuite = suiteBcifWriter()
     unittest.TextTestRunner(verbosity=2, descriptions=False).run(mySuite)

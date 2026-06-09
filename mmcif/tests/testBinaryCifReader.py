@@ -41,11 +41,14 @@ class BinaryCifReaderTests(unittest.TestCase):
         #
         self.__pathOutputDir = os.path.join(HERE, "test-output")
         #
-        self.__locatorRcsbBcifGzip = "https://models.rcsb.org/1bna.bcif.gz"
+        self.__locatorRcsbBcifGzip = "mmcif/tests/data/4bts-with_autoDetect.bcif.gz"
         #
         # RCSB examples produced with MolStar
-        self.__pathRcsbBcifGzip = os.path.join(HERE, "data", "1bna.bcif.gz")
-        self.__pathRcsbBcifTranslated = os.path.join(self.__pathOutputDir, "1bna-translated.cif")
+        #self.__pathRcsbBcifGzip = os.path.join(HERE, "data", "4bts-py_generated.bcif.gz")
+        #self.__pathRcsbBcifTranslated = os.path.join(self.__pathOutputDir, "4bts-dicTranslated.cif")
+
+        self.__pathRcsbBcifGzip = os.path.join(HERE, "data", "4bts-with_autoDetect.bcif.gz")
+        self.__pathRcsbBcifTranslated = os.path.join(self.__pathOutputDir, "4bts-autoDetect.cif")
         #
         #  PDBDEV examples produced with MolStar
         self.__pathPdbdevBcif = os.path.join(HERE, "data", "PDBDEV_00000041.bcif")
