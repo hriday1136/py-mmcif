@@ -1,5 +1,6 @@
 data/
 results/
+autodetect-similarityTest/
 
 *.bcif
 *.cif

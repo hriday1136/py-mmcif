@@ -114,3 +114,5 @@ venv.bak/
 datatype_dict-vs-auto.csv
 dataType_dict.txt
 dataType.txt
+compare_cif_mismatch.txt
+compare_mismatch_original.txt

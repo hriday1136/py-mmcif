@@ -178,6 +178,12 @@ def classify_column(values: list) -> ColumnProfile:
             # char-level fast path before paying for regex
             candidate = s[1:] if s and s[0] == "-" else s
             if candidate.isdigit():
+                if len(candidate)>1 and candidate[0] == "0":
+                    # leading zero disqualifies integer type — treat as string
+                    all_int = all_float = False
+                    type_decided = True
+                    continue
+                #--------------------------------------
                 n = int(s)
                 all_float = False
             elif _FLOAT.match(s):
@@ -220,7 +226,15 @@ def classify_column(values: list) -> ColumnProfile:
     p.has_long_runs  = long_run_seen
     p.unique_ratio   = len(unique) / total if total else 1.0
 
-    if all_int and total > 0:
+    if total == 0:
+        # Every value was a sentinel (e.g. pdbx_formal_charge all "?").
+        # No present values to type from. Default to int: cheapest encoding
+        # (IntArrayMasked fills masked with 0 → Delta+RunLength collapses),
+        # and decode is identical regardless of declared type since every
+        # value is masked.
+        p.col_type = "int"
+
+    elif all_int:
         p.col_type = "int"
         lo, hi = col_min, col_max
         if   lo >= 0    and hi <= 255:   p.int_width = "uint8"
@@ -229,11 +243,12 @@ def classify_column(values: list) -> ColumnProfile:
         elif lo >= -32768 and hi <= 32767: p.int_width = "int16"
         else:                            p.int_width = "int32"
 
-    elif all_float and total > 0:
+    elif all_float:
         p.col_type   = "float"
         p.float_prec = "f32" if max_dec <= 6 else "f64"
 
     else:
         p.col_type = "str"
+
 
     return p
