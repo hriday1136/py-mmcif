@@ -9,43 +9,16 @@ def main():
     # Include common PDBx/mmCIF dictionary and CSM extension (ModelCIF) dictionary
     directory = Path("benchmarks/data/cif")
     sizeList = []
-    cifList = ["10DK",
-                "11BJ",
+    cifList = ["4HHB",
                 "11HB",
-                "11TG",
-                "12GB",
-                "1RMN",
-                "1SSZ",
-                "1UR6",
-                "2BVK",
-                "2LGI",
-                "2XKM",
                 "3HQV",
                 "3IFX",
                 "3J3Q",
-                "3PDM",
-                "4BTS",
-                "4HHB",
-                "6VC1",
-                "7ART",
-                "8ZZ1",
-                "8ZZI",
-                "9A01",
-                "9A1G",
                 "9A25",
-                "9A8K",
-                "9A8M",
                 "9AAO",
-                "9HH6",
-                "9O5G",
-                "9QW5",
+                "9A8K",
                 "AF_AFA0A017SEY2F1",
-                "AF_AFA0A017SQ41F1",
-                "MA_MAASFVASFVG001",
-                "MA_MABAKCEPC0001",
-                "MA_MACOFFESLACC100000G1I1",
-                "MA_MAORNLSPHDIV00001",
-                "MA_MAT3VR3003"]
+                "MA_MABAKCEPC0001"]
 
     # Flag controlling whether the auto-detection type system is used (default) or the
     # dictionaryApi-driven column typing (legacy path). Set to False to use the dictionary.
@@ -87,11 +60,11 @@ def main():
         writeBcif(cL, outFilePath=outFilePath, dictionaryApi=dictionaryApi, useAutoDetect=useAutoDetect)
         endTime = time.perf_counter()
         runtime = (endTime - startTime)*1000
-        sizeList.append(f"{runtime:.3f}")
+        #sizeList.append(f"{runtime:.3f}")
 
         # Output file size for reference
         size = Path(outFilePath).stat().st_size
-#        sizeList.append(size)
+        sizeList.append(size)
 
     for s in sizeList:
         print(s)
